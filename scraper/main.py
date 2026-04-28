@@ -1,51 +1,92 @@
 """
-Winery Vacation – Weekly Availability Scraper
-voyager/booking-scraper → Supabase Edge Function
+Winery Vacation – Hotel Availability Scraper
+voyager/booking-scraper → Supabase availabilities
 
-Läuft wöchentlich via GitHub Actions (montags 03:00 UTC).
+Standard-Modus: scrapet die nächsten 90 Tage (für wöchentliche Runs)
+Initial-Modus:  scrapet die nächsten 180 Tage (einmalig, beim ersten Setup)
+
+Steuerung über Umgebungsvariable DAYS_AHEAD (default 90).
 """
 
 import os
 import sys
 import time
 import logging
-from datetime import date, timedelta, datetime
+from datetime import date, datetime, timedelta
 
 import httpx
 from apify_client import ApifyClient
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-APIFY_TOKEN       = os.environ["APIFY_TOKEN"]
-MAKE_API_KEY      = os.environ["MAKE_API_KEY"]
+APIFY_TOKEN  = os.environ["APIFY_TOKEN"]
+MAKE_API_KEY = os.environ["MAKE_API_KEY"]
 SUPABASE_ENDPOINT = (
     "https://pfvupcmrxrnkjyqlopyz.supabase.co"
     "/functions/v1/bulk-import-availabilities"
 )
 
-# Nächste 12 Wochen, wöchentliche Check-in-Slots
+# Wie viele Tage in die Zukunft scrapen?
+DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "90"))
+
+# Welche Daten genau? Jeder Tag der nächsten N Tage (eine Nacht pro Slot)
+START_DATE = date.today() + timedelta(days=1)  # ab morgen
 CHECK_IN_DATES = [
-    (date.today() + timedelta(weeks=w)).isoformat()
-    for w in range(1, 13)
+    (START_DATE + timedelta(days=d)).isoformat()
+    for d in range(DAYS_AHEAD)
 ]
 
-APIFY_BATCH_SIZE    = 20   # Hotels pro Apify-Run
-SUPABASE_BATCH_SIZE = 500  # Hard Limit des Endpoints
+APIFY_BATCH_SIZE    = 20    # Hotels pro Apify-Run
+SUPABASE_BATCH_SIZE = 500   # Hard Limit des Endpoints
 MAX_RETRIES         = 3
-RETRY_DELAY         = 10   # Sekunden (wird multipliziert pro Versuch)
+RETRY_DELAY         = 10    # Sekunden (wird multipliziert pro Versuch)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    format="%(asctime)s  %(levelname)-7s  %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger(__name__)
 
 # ── Hotels laden ──────────────────────────────────────────────────────────────
 
-from hotels import HOTEL_URLS  # Liste der 120 Booking.com URLs (siehe hotels.py)
+from hotels import HOTEL_URLS
+
+# ── Mealplan-Erkennung ────────────────────────────────────────────────────────
+
+def detect_mealplan(your_choices: list) -> str:
+    """
+    Aus dem yourChoicesArray die Verpflegung erkennen.
+    Mapping auf Supabase-Werte: room_only, breakfast, half_board, full_board, all_inclusive
+    """
+    text = " ".join(str(c).lower() for c in (your_choices or []))
+
+    if "all inclusive" in text or "all-inclusive" in text:
+        return "all_inclusive"
+    if "vollpension" in text or "full board" in text:
+        return "full_board"
+    if "halbpension" in text or "half board" in text:
+        return "half_board"
+    if "frühstück" in text or "breakfast" in text:
+        return "breakfast"
+    return "room_only"
+
+
+# ── Cancellation-Erkennung ────────────────────────────────────────────────────
+
+def detect_cancellation(option: dict) -> str:
+    """
+    Aus optionsArray.cancellationType bzw. freeCancellation Flag.
+    """
+    if option.get("freeCancellation") is True:
+        return "free_cancellation"
+    cancel_type = option.get("cancellationType")
+    if cancel_type:
+        return str(cancel_type)
+    return "non_refundable"
+
 
 # ── Apify ─────────────────────────────────────────────────────────────────────
 
@@ -55,35 +96,154 @@ def run_apify(hotel_urls: list[str], check_in: str) -> list[dict]:
     client    = ApifyClient(APIFY_TOKEN)
 
     run_input = {
-        "startUrls": [{"url": url} for url in hotel_urls],
+        "startUrls": [{"url": url, "method": "GET"} for url in hotel_urls],
         "checkIn":   check_in,
         "checkOut":  check_out,
         "currency":  "EUR",
         "language":  "de",
         "rooms":     1,
         "adults":    2,
-        # Zimmer-Details & Ausstattung aktivieren (kostenpflichtiges Add-on):
-        # "scrapeRoomOfferings": True,
+        "flexWindow": "1",
+        "maxItems":  len(hotel_urls) * 2,  # Puffer
+        "propertyType": "none",
+        "sortBy": "bayesian_review_score",
+        "starsCountFilter": "any",
     }
 
     log.info("Apify | %d URLs | check_in=%s", len(hotel_urls), check_in)
-    run   = client.actor("voyager/booking-scraper").call(run_input=run_input)
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
-    log.info("  → %d Items", len(items))
-    return items
 
-
-# ── Mapping: Apify-Output → Supabase-Records ─────────────────────────────────
-
-def extract_hotel_id(url: str) -> str:
-    """https://www.booking.com/hotel/de/SLUG.html → SLUG"""
     try:
-        return url.split("/hotel/")[1].split("/")[1].split(".html")[0].split("?")[0]
-    except Exception:
-        return url
+        run   = client.actor("voyager/booking-scraper").call(run_input=run_input)
+        items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        log.info("  → %d Hotels", len(items))
+        return items
+    except Exception as e:
+        log.error("  Apify-Fehler: %s", e)
+        return []
 
 
-def is_valid_date(date_str: str) -> bool:
+# ── Mapping: Apify → Supabase ────────────────────────────────────────────────
+
+def map_hotel(hotel_item: dict) -> list[dict]:
+    """
+    Ein Hotel-Item aus Apify → Liste von Supabase-Records.
+    Pro Zimmer × pro Option = 1 Record.
+    """
+    records = []
+
+    # Hotel-Stammdaten
+    hotel_id   = str(hotel_item.get("hotelId") or "").strip()
+    hotel_name = hotel_item.get("name") or ""
+    check_in   = hotel_item.get("checkInDate")  # ISO-Datum vom Apify-Actor
+
+    # Validierung: hotel_id und Datum müssen vorhanden sein
+    if not hotel_id:
+        log.debug("Hotel ohne hotelId – übersprungen: %s", hotel_name)
+        return []
+
+    if not check_in or not _is_valid_date(check_in):
+        log.debug("Hotel %s ohne valides checkInDate (%s) – übersprungen", hotel_id, check_in)
+        return []
+
+    rooms = hotel_item.get("roomsArray") or []
+
+    # Fall 1: Hotel hat Zimmer mit Optionen → ein Record pro Zimmer × Option
+    if rooms:
+        for room in rooms:
+            room_id    = str(room.get("id") or "").strip()
+            room_name  = room.get("roomType") or "Zimmer"
+            room_avail = bool(room.get("available", False))
+            rooms_left = int(room.get("roomsLeft") or 0)
+            max_persons = int(room.get("persons") or 2)
+
+            if not room_id or room_id == "0":
+                continue  # ungültige Room-ID überspringen
+
+            options = room.get("optionsArray") or []
+
+            # Wenn keine Optionen, aber Zimmer existiert: einen Record für "nicht verfügbar"
+            if not options:
+                avail_key = f"{hotel_id}_{check_in}_{room_id}_room_only_{max_persons}_unknown"
+                records.append({
+                    "availability_key": avail_key,
+                    "hotel_id":    hotel_id,
+                    "hotel_name":  hotel_name,
+                    "room_id":     room_id,
+                    "room_name":   room_name,
+                    "date":        check_in,
+                    "price_eur":   0,
+                    "rooms_left":  0,
+                    "available":   False,
+                    "mealplan":    "room_only",
+                    "max_persons": max_persons,
+                    "persons":     max_persons,
+                    "cancellation": "unknown",
+                    "source":      "github-actions",
+                })
+                continue
+
+            # Pro Option ein Record
+            for opt in options:
+                price = opt.get("price")
+                if price is None:
+                    continue
+                try:
+                    price_eur = float(price)
+                except (TypeError, ValueError):
+                    continue
+                if not (0 < price_eur < 100000):
+                    continue  # außerhalb des Supabase-Range
+
+                opt_persons = int(opt.get("persons") or max_persons)
+                mealplan    = detect_mealplan(opt.get("yourChoicesArray"))
+                cancellation = detect_cancellation(opt)
+
+                avail_key = (
+                    f"{hotel_id}_{check_in}_{room_id}_"
+                    f"{mealplan}_{opt_persons}_{cancellation}"
+                )
+
+                records.append({
+                    "availability_key": avail_key,
+                    "hotel_id":    hotel_id,
+                    "hotel_name":  hotel_name,
+                    "room_id":     room_id,
+                    "room_name":   room_name,
+                    "date":        check_in,
+                    "price_eur":   round(price_eur, 2),
+                    "rooms_left":  rooms_left,
+                    "available":   room_avail,
+                    "mealplan":    mealplan,
+                    "max_persons": max_persons,
+                    "persons":     opt_persons,
+                    "cancellation": cancellation,
+                    "source":      "github-actions",
+                })
+
+    # Fall 2: Hotel hat KEINE Zimmer-Daten → ein Record als "nicht verfügbar"
+    else:
+        avail_key = f"{hotel_id}_{check_in}_no_rooms_room_only_2_unknown"
+        records.append({
+            "availability_key": avail_key,
+            "hotel_id":    hotel_id,
+            "hotel_name":  hotel_name,
+            "room_id":     "no_rooms",
+            "room_name":   "Keine Verfügbarkeit",
+            "date":        check_in,
+            "price_eur":   0,
+            "rooms_left":  0,
+            "available":   False,
+            "mealplan":    "room_only",
+            "max_persons": 2,
+            "persons":     2,
+            "cancellation": "unknown",
+            "source":      "github-actions",
+        })
+
+    return records
+
+
+def _is_valid_date(date_str) -> bool:
     """Prüft ob ein String ein valides ISO-Datum (YYYY-MM-DD) ist."""
     if not date_str or not isinstance(date_str, str):
         return False
@@ -94,96 +254,16 @@ def is_valid_date(date_str: str) -> bool:
         return False
 
 
-def map_item(item: dict) -> list[dict]:
-    """
-    Ein Apify-Item → eine oder mehrere Supabase-Records.
-    Liste, weil ein Hotel mehrere Zimmertypen haben kann.
-    """
-    records  = []
-    url      = item.get("url", "")
-    hotel_id = item.get("hotelId") or extract_hotel_id(url)
-    check_in = item.get("checkIn") or item.get("checkin")
-
-    # Validierung: check_in muss ein valides ISO-Datum sein
-    if not is_valid_date(check_in):
-        log.debug("Ungültiges Datum '%s' für %s – übersprungen", check_in, hotel_id)
-        return []
-
-    # ── Mit Room-Offerings Add-on (detaillierte Zimmer-Ebene) ────────────────
-    room_offerings = item.get("roomOfferings") or []
-    if room_offerings:
-        for room in room_offerings:
-            price = room.get("price") or room.get("pricePerNight")
-            if price is None:
-                continue
-
-            room_id      = str(room.get("id") or room.get("roomId") or "default")
-            room_name    = room.get("name") or room.get("roomName") or "Zimmer"
-            mealplan     = (room.get("mealplan") or room.get("boardType") or "RO").upper()
-            persons      = int(room.get("maxPersons") or room.get("persons") or 2)
-            cancellation = "free" if room.get("freeCancellation") else "non-refundable"
-            rooms_left   = int(room.get("roomsLeft") or 0)
-            # Ausstattung als kommaseparierter String
-            facilities   = room.get("facilities") or room.get("amenities") or []
-            facilities_str = ", ".join(facilities) if isinstance(facilities, list) else str(facilities)
-
-            avail_key = f"{hotel_id}_{check_in}_{room_id}_{mealplan}_{persons}_{cancellation}"
-
-            records.append({
-                "availability_key": avail_key,
-                "hotel_id":    hotel_id,
-                "room_id":     room_id,
-                "date":        check_in,
-                "price_eur":   float(price),
-                "rooms_left":  rooms_left,
-                "available":   rooms_left > 0,
-                "room_name":   room_name,
-                "mealplan":    mealplan,
-                "persons":     persons,
-                "cancellation": cancellation,
-                "source":      "apify-weekly",
-            })
-
-    # ── Ohne Add-on (Hotel-Ebene, Standard-Output) ───────────────────────────
-    else:
-        price = item.get("price") or item.get("priceFrom") or item.get("minPrice")
-        if price is None:
-            return []
-
-        mealplan     = (item.get("mealplan") or item.get("boardType") or "RO").upper()
-        persons      = int(item.get("adults") or item.get("persons") or 2)
-        cancellation = "free" if item.get("freeCancellation") else "non-refundable"
-        rooms_left   = int(item.get("roomsLeft") or item.get("availability") or 1)
-
-        avail_key = f"{hotel_id}_{check_in}_default_{mealplan}_{persons}_{cancellation}"
-
-        records.append({
-            "availability_key": avail_key,
-            "hotel_id":    hotel_id,
-            "room_id":     "default",
-            "date":        check_in,
-            "price_eur":   float(price),
-            "rooms_left":  rooms_left,
-            "available":   rooms_left > 0,
-            "room_name":   item.get("roomType") or "Standardzimmer",
-            "mealplan":    mealplan,
-            "persons":     persons,
-            "cancellation": cancellation,
-            "source":      "apify-weekly",
-        })
-
-    return records
-
-
 # ── Supabase Upsert ───────────────────────────────────────────────────────────
 
-def upsert(records: list[dict]) -> None:
-    """Records in 500er-Batches an den Supabase Endpoint schicken."""
+def upsert(records: list[dict]) -> int:
+    """Records in 500er-Batches an den Supabase Endpoint schicken. Gibt Anzahl gesendeter Records zurück."""
     total = len(records)
     sent  = 0
 
     for i in range(0, total, SUPABASE_BATCH_SIZE):
         batch = records[i : i + SUPABASE_BATCH_SIZE]
+        success = False
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -199,6 +279,7 @@ def upsert(records: list[dict]) -> None:
                 resp.raise_for_status()
                 sent += len(batch)
                 log.info("  Upsert %d/%d ✓", sent, total)
+                success = True
                 break
 
             except httpx.HTTPStatusError as e:
@@ -212,50 +293,54 @@ def upsert(records: list[dict]) -> None:
 
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY * attempt)
-            else:
-                log.error("  Batch %d–%d dauerhaft fehlgeschlagen – Abbruch", i + 1, i + len(batch))
-                sys.exit(1)
+
+        if not success:
+            log.error("  Batch %d–%d dauerhaft fehlgeschlagen – fahre mit nächstem Batch fort", i + 1, i + len(batch))
+
+    return sent
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     log.info("=== Winery Vacation Scraper gestartet ===")
-    log.info("%d Hotels | %d Check-in-Daten", len(HOTEL_URLS), len(CHECK_IN_DATES))
+    log.info("Modus: %d Tage voraus | %d Hotels", DAYS_AHEAD, len(HOTEL_URLS))
+    log.info("Zeitraum: %s bis %s", CHECK_IN_DATES[0], CHECK_IN_DATES[-1])
+    log.info("Geschätzte Apify-Calls: %d", len(HOTEL_URLS) * len(CHECK_IN_DATES))
 
-    all_records: list[dict] = []
-    skipped = 0
+    grand_total_sent = 0
+    grand_total_skipped = 0
 
-    for check_in in CHECK_IN_DATES:
-        for i in range(0, len(HOTEL_URLS), APIFY_BATCH_SIZE):
-            batch = HOTEL_URLS[i : i + APIFY_BATCH_SIZE]
-            try:
-                items = run_apify(batch, check_in)
-            except Exception as e:
-                log.error("Apify-Fehler | check_in=%s | Batch %d | %s", check_in, i, e)
-                continue
+    # Wir verarbeiten Tag für Tag und upserten direkt nach jedem Tag
+    # Das vermeidet Speicher-Probleme bei großen Datenmengen
+    for date_idx, check_in in enumerate(CHECK_IN_DATES, start=1):
+        log.info("[%d/%d] Datum: %s", date_idx, len(CHECK_IN_DATES), check_in)
+
+        day_records = []
+
+        for batch_idx in range(0, len(HOTEL_URLS), APIFY_BATCH_SIZE):
+            batch = HOTEL_URLS[batch_idx : batch_idx + APIFY_BATCH_SIZE]
+            items = run_apify(batch, check_in)
 
             for item in items:
-                mapped = map_item(item)
+                mapped = map_hotel(item)
                 if mapped:
-                    all_records.extend(mapped)
+                    day_records.extend(mapped)
                 else:
-                    skipped += 1
+                    grand_total_skipped += 1
 
-        time.sleep(3)  # Rate Limiting zwischen Dates
+        if day_records:
+            log.info("Upsert für %s: %d Records", check_in, len(day_records))
+            sent = upsert(day_records)
+            grand_total_sent += sent
+        else:
+            log.warning("Keine Records für %s", check_in)
 
-    log.info(
-        "Scraping abgeschlossen: %d Records | %d übersprungen",
-        len(all_records), skipped
-    )
+        # Kurze Pause zwischen Tagen
+        time.sleep(2)
 
-    if not all_records:
-        log.warning("Keine Records – Job beendet.")
-        return
-
-    log.info("Starte Upsert nach Supabase …")
-    upsert(all_records)
-    log.info("=== Fertig. %d Records in Supabase. ===", len(all_records))
+    log.info("=== FERTIG ===")
+    log.info("Gesendet: %d Records | Übersprungen: %d", grand_total_sent, grand_total_skipped)
 
 
 if __name__ == "__main__":
