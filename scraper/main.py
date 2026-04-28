@@ -58,7 +58,7 @@ from hotels import HOTEL_URLS
 
 def detect_mealplan(your_choices: list) -> str:
     """
-    Aus dem yourChoicesArray die Verpflegung erkennen.
+    Aus dem yourChoices-Feld die Verpflegung erkennen.
     Mapping auf Supabase-Werte: room_only, breakfast, half_board, full_board, all_inclusive
     """
     text = " ".join(str(c).lower() for c in (your_choices or []))
@@ -67,7 +67,7 @@ def detect_mealplan(your_choices: list) -> str:
         return "all_inclusive"
     if "vollpension" in text or "full board" in text:
         return "full_board"
-    if "halbpension" in text or "half board" in text:
+    if "halbpension" in text or "half board" in text or "abendessen" in text:
         return "half_board"
     if "frühstück" in text or "breakfast" in text:
         return "breakfast"
@@ -145,7 +145,7 @@ def map_hotel(hotel_item: dict) -> list[dict]:
         log.debug("Hotel %s ohne valides checkInDate (%s) – übersprungen", hotel_id, check_in)
         return []
 
-    rooms = hotel_item.get("roomsArray") or []
+    rooms = hotel_item.get("rooms") or []
 
     # Fall 1: Hotel hat Zimmer mit Optionen → ein Record pro Zimmer × Option
     if rooms:
@@ -159,7 +159,7 @@ def map_hotel(hotel_item: dict) -> list[dict]:
             if not room_id or room_id == "0":
                 continue  # ungültige Room-ID überspringen
 
-            options = room.get("optionsArray") or []
+            options = room.get("options") or []
 
             # Wenn keine Optionen, aber Zimmer existiert: einen Record für "nicht verfügbar"
             if not options:
@@ -195,7 +195,7 @@ def map_hotel(hotel_item: dict) -> list[dict]:
                     continue  # außerhalb des Supabase-Range
 
                 opt_persons = int(opt.get("persons") or max_persons)
-                mealplan    = detect_mealplan(opt.get("yourChoicesArray"))
+                mealplan    = detect_mealplan(opt.get("yourChoices"))
                 cancellation = detect_cancellation(opt)
 
                 avail_key = (
