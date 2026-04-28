@@ -9,7 +9,7 @@ import os
 import sys
 import time
 import logging
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 import httpx
 from apify_client import ApifyClient
@@ -83,6 +83,17 @@ def extract_hotel_id(url: str) -> str:
         return url
 
 
+def is_valid_date(date_str: str) -> bool:
+    """Prüft ob ein String ein valides ISO-Datum (YYYY-MM-DD) ist."""
+    if not date_str or not isinstance(date_str, str):
+        return False
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def map_item(item: dict) -> list[dict]:
     """
     Ein Apify-Item → eine oder mehrere Supabase-Records.
@@ -93,7 +104,9 @@ def map_item(item: dict) -> list[dict]:
     hotel_id = item.get("hotelId") or extract_hotel_id(url)
     check_in = item.get("checkIn") or item.get("checkin")
 
-    if not check_in:
+    # Validierung: check_in muss ein valides ISO-Datum sein
+    if not is_valid_date(check_in):
+        log.debug("Ungültiges Datum '%s' für %s – übersprungen", check_in, hotel_id)
         return []
 
     # ── Mit Room-Offerings Add-on (detaillierte Zimmer-Ebene) ────────────────
