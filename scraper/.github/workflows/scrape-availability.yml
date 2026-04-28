@@ -1,0 +1,39 @@
+name: Weekly Hotel Availability Scrape
+
+on:
+  schedule:
+    # Montags 03:00 UTC = 05:00 CEST / 04:00 CET
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    # Manueller Trigger zum Testen – kein Commit nötig
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # Apify-Runs für 120 Hotels brauchen Zeit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Dependencies installieren
+        run: pip install apify-client httpx
+
+      - name: Scraper ausführen
+        run: python scraper/main.py
+        env:
+          APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
+          MAKE_API_KEY: ${{ secrets.MAKE_API_KEY }}
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          echo "### Scraper Run" >> $GITHUB_STEP_SUMMARY
+          echo "Abgeschlossen: $(date '+%d.%m.%Y %H:%M UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
