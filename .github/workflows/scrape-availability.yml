@@ -1,23 +1,47 @@
-name: Weekly Hotel Availability Scrape
+name: Hotel Availability Scrape
+
 on:
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
+    inputs:
+      days_ahead:
+        description: "Wie viele Tage voraus? (90 für wöchentlich, 180 für Initial-Run)"
+        required: true
+        default: "90"
+        type: choice
+        options:
+          - "30"
+          - "90"
+          - "180"
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 350
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Python einrichten
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Dependencies installieren
         run: pip install apify-client httpx
+
       - name: Scraper ausführen
         run: python scraper/main.py
         env:
-          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
           MAKE_API_KEY: ${{ secrets.MAKE_API_KEY }}
+          DAYS_AHEAD:   ${{ github.event.inputs.days_ahead || '90' }}
+
+      - name: Zusammenfassung
+        if: always()
+        run: |
+          echo "### Scraper Run" >> $GITHUB_STEP_SUMMARY
+          echo "Tage voraus: ${{ github.event.inputs.days_ahead || '90' }}" >> $GITHUB_STEP_SUMMARY
+          echo "Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
