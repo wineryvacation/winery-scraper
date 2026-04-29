@@ -197,11 +197,16 @@ def map_hotel(hotel_item: dict) -> list[dict]:
                 opt_persons = int(opt.get("persons") or max_persons)
                 mealplan    = detect_mealplan(opt.get("yourChoices"))
                 cancellation = detect_cancellation(opt)
+                option_id   = str(opt.get("id") or "").strip()
 
-                avail_key = (
-                    f"{hotel_id}_{check_in}_{room_id}_"
-                    f"{mealplan}_{opt_persons}_{cancellation}"
-                )
+                if option_id:
+                    avail_key = f"{hotel_id}_{check_in}_{option_id}"
+                else:
+                    # Fallback falls keine option.id vorhanden
+                    avail_key = (
+                        f"{hotel_id}_{check_in}_{room_id}_"
+                        f"{mealplan}_{opt_persons}_{cancellation}"
+                    )
 
                 records.append({
                     "availability_key": avail_key,
@@ -330,6 +335,16 @@ def main() -> None:
                     grand_total_skipped += 1
 
         if day_records:
+            # Deduplizieren nach availability_key (letzter Wert gewinnt)
+            # Verhindert "ON CONFLICT DO UPDATE command cannot affect row a second time"
+            before_dedup = len(day_records)
+            seen: dict[str, dict] = {}
+            for r in day_records:
+                seen[r["availability_key"]] = r
+            day_records = list(seen.values())
+            dupes = before_dedup - len(day_records)
+            if dupes:
+                log.warning("  %d Duplikate entfernt (vor Upsert)", dupes)
             log.info("Upsert für %s: %d Records", check_in, len(day_records))
             sent = upsert(day_records)
             grand_total_sent += sent
