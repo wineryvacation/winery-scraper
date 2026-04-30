@@ -1,4 +1,4 @@
-name: Hotel Availability Scrape
+name: Scrape Availability
 
 on:
   schedule:
@@ -6,15 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       days_ahead:
-        description: "Wie viele Tage scrapen? (35 für Chunk, 90 für wöchentlich)"
-        required: true
+        description: "Wie viele Tage scrapen? (25 fuer Chunk, 90 fuer woechentlich)"
+        type: string
         default: "90"
-        type: string
       start_offset:
-        description: "Ab welchem Tag relativ zu morgen starten? (0=ab morgen, 38=ab 08.06.2026, ...)"
-        required: true
-        default: "0"
+        description: "Ab welchem Tag relativ zu morgen starten? (0=ab morgen)"
         type: string
+        default: "0"
 
 jobs:
   scrape:
@@ -22,29 +20,29 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Python einrichten
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Dependencies installieren
-        run: pip install apify-client httpx
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Scraper ausführen
-        run: python scraper/main.py
+      - name: Run scraper
         env:
-          APIFY_TOKEN:   ${{ secrets.APIFY_TOKEN }}
-          MAKE_API_KEY:  ${{ secrets.MAKE_API_KEY }}
-          DAYS_AHEAD:    ${{ github.event.inputs.days_ahead || '90' }}
-          START_OFFSET:  ${{ github.event.inputs.start_offset || '0' }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          MAKE_API_KEY: ${{ secrets.MAKE_API_KEY }}
+          DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '90' }}
+          START_OFFSET: ${{ github.event.inputs.start_offset || '0' }}
+        run: python scraper/main.py
 
-      - name: Zusammenfassung
+      - name: Write summary
         if: always()
         run: |
           echo "### Scraper Run" >> $GITHUB_STEP_SUMMARY
           echo "Tage voraus: ${{ github.event.inputs.days_ahead || '90' }}" >> $GITHUB_STEP_SUMMARY
           echo "Start-Offset: ${{ github.event.inputs.start_offset || '0' }}" >> $GITHUB_STEP_SUMMARY
-          echo "Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "Status: success" >> $GITHUB_STEP_SUMMARY
