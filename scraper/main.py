@@ -26,11 +26,11 @@ SUPABASE_ENDPOINT = (
     "/functions/v1/bulk-import-availabilities"
 )
 
-# Wie viele Tage in die Zukunft scrapen?
 DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "90"))
+START_OFFSET = int(os.environ.get("START_OFFSET", "0"))
 
 # Welche Daten genau? Jeder Tag der nächsten N Tage (eine Nacht pro Slot)
-START_DATE = date.today() + timedelta(days=1)  # ab morgen
+START_DATE = date.today() + timedelta(days=1 + START_OFFSET)  # ab morgen + Offset
 CHECK_IN_DATES = [
     (START_DATE + timedelta(days=d)).isoformat()
     for d in range(DAYS_AHEAD)
