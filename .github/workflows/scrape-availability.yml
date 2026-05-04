@@ -13,12 +13,18 @@ on:
         description: "Ab welchem Tag relativ zu morgen starten? (0=ab morgen)"
         type: string
         default: "0"
+      target_offset:
+        description: "Bis zu welchem Offset insgesamt scrapen? (180=halbes Jahr, 0=nur dieser Run)"
+        type: string
+        default: "0"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
+    outputs:
+      next_offset: ${{ steps.calc_next.outputs.next_offset }}
+      should_continue: ${{ steps.calc_next.outputs.should_continue }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,10 +45,48 @@ jobs:
           START_OFFSET: ${{ github.event.inputs.start_offset || '0' }}
         run: python scraper/main.py
 
+      - name: Calculate next offset
+        id: calc_next
+        run: |
+          CURRENT_OFFSET=${{ github.event.inputs.start_offset || '0' }}
+          DAYS_AHEAD=${{ github.event.inputs.days_ahead || '90' }}
+          TARGET_OFFSET=${{ github.event.inputs.target_offset || '0' }}
+          NEXT_OFFSET=$((CURRENT_OFFSET + DAYS_AHEAD))
+          echo "next_offset=$NEXT_OFFSET" >> $GITHUB_OUTPUT
+          if [ "$NEXT_OFFSET" -lt "$TARGET_OFFSET" ]; then
+            echo "should_continue=true" >> $GITHUB_OUTPUT
+            echo "Naechster Run: START_OFFSET=$NEXT_OFFSET (Ziel: $TARGET_OFFSET)"
+          else
+            echo "should_continue=false" >> $GITHUB_OUTPUT
+            echo "Ziel erreicht: $NEXT_OFFSET >= $TARGET_OFFSET"
+          fi
+
+      - name: Trigger next run
+        if: steps.calc_next.outputs.should_continue == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.SELF_TRIGGER_TOKEN }}
+        run: |
+          NEXT_OFFSET=${{ steps.calc_next.outputs.next_offset }}
+          DAYS_AHEAD=${{ github.event.inputs.days_ahead || '90' }}
+          TARGET_OFFSET=${{ github.event.inputs.target_offset || '0' }}
+          REMAINING=$((TARGET_OFFSET - NEXT_OFFSET))
+          if [ "$REMAINING" -lt "$DAYS_AHEAD" ]; then
+            DAYS_AHEAD=$REMAINING
+          fi
+          echo "Triggere naechsten Run: offset=$NEXT_OFFSET, days=$DAYS_AHEAD, target=$TARGET_OFFSET"
+          curl -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/marcoboehm/winery-scraper/actions/workflows/scrape-availability.yml/dispatches \
+            -d "{\"ref\":\"main\",\"inputs\":{\"days_ahead\":\"$DAYS_AHEAD\",\"start_offset\":\"$NEXT_OFFSET\",\"target_offset\":\"$TARGET_OFFSET\"}}"
+
       - name: Write summary
         if: always()
         run: |
           echo "### Scraper Run" >> $GITHUB_STEP_SUMMARY
           echo "Tage voraus: ${{ github.event.inputs.days_ahead || '90' }}" >> $GITHUB_STEP_SUMMARY
           echo "Start-Offset: ${{ github.event.inputs.start_offset || '0' }}" >> $GITHUB_STEP_SUMMARY
-          echo "Status: success" >> $GITHUB_STEP_SUMMARY
+          echo "Ziel-Offset: ${{ github.event.inputs.target_offset || '0' }}" >> $GITHUB_STEP_SUMMARY
+          echo "Naechster Offset: ${{ steps.calc_next.outputs.next_offset }}" >> $GITHUB_STEP_SUMMARY
+          echo "Weiterer Run folgt: ${{ steps.calc_next.outputs.should_continue }}" >> $GITHUB_STEP_SUMMARY
